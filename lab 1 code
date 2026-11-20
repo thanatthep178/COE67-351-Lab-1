@@ -1,0 +1,118 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+#include <ArduinoJson.h>
+
+// --- กำหนดค่าการเชื่อมต่อ Wi-Fi และ Broker ของคุณ ---
+const char* ssid = "My wifi";        //  หรือชื่อ Wi-Fi ของคุณ
+const char* password = "Password";    // รหัสผ่าน Wi-Fi ของคุณ
+const char* mqtt_server = "mqtt-dashboard.com"; // ถ้าใช้ Broker ในแล็บใส่ IP, ถ้าทดสอบผ่านเว็บใส่ mqtt-dashboard.com
+
+// --- กำหนดค่าเฉพาะกลุ่ม (Pair/Node) ---
+const char* NODE_ID = "p02";
+const char* TOPIC_ENV = "coe67351/p02/env";
+const char* TOPIC_STATUS = "coe67351/p02/status";
+
+// --- กำหนดขาเซนเซอร์ ---
+#define DHTPIN 4     // ขา GPIO ที่ต่อกับ DHT22
+#define DHTTYPE DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+unsigned long lastMsg = 0;
+const long interval = 10000; // ส่งทุกๆ 10 วินาที
+unsigned long seq = 0;
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // เชื่อมต่อพร้อมตั้งค่า Last Will (LWT)
+    if (client.connect(NODE_ID, TOPIC_STATUS, 1, true, "offline")) {
+      Serial.println("connected");
+      client.publish(TOPIC_STATUS, "online", true);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  setup_wifi();
+
+  // กำหนดพอร์ต MQTT เป็น 1883 (กรณีใช้ Broker ทั่วไป) หรือปรับตามที่ใช้งาน
+  client.setServer(mqtt_server, 1883);
+}
+
+void loop() {
+  // ระบบกู้คืนการเชื่อมต่อ Wi-Fi และ MQTT อัตโนมัติ (Task 4)
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected. Reconnecting...");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("WiFi reconnected");
+  }
+
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsg > interval) {
+    lastMsg = now;
+    seq++;
+
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+
+    if (isnan(h) || isnan(t)) {
+      Serial.println(F("Failed to read from DHT sensor!"));
+      return;
+    }
+
+    long rssi = WiFi.RSSI();
+
+    StaticJsonDocument<200> doc;
+    doc["node"] = NODE_ID;
+    doc["seq"] = seq;
+    doc["temp_c"] = t;
+    doc["rh"] = h;
+    doc["rssi"] = rssi;
+
+    char buffer[256];
+    serializeJson(doc, buffer);
+
+    Serial.println(buffer);
+    client.publish(TOPIC_ENV, buffer, true);
+  }
+}
